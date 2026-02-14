@@ -81,9 +81,9 @@ Plan:
     {{"tool": "count_lines_words", "params": {{"file_path": "$step1.data.0.full_path"}}}}
 ]}}
 
-Kullanıcı: "src klasöründeki dosyalarda TODO ara"
+Kullanıcı: "src klasöründeki dosyalarda hata ara"
 Plan:
-{{"steps": [{{"tool": "search_in_files", "params": {{"query": "TODO", "directory": "src"}}}}]}}
+{{"steps": [{{"tool": "search_in_files", "params": {{"query": "hata", "directory": "src"}}}}]}}
 
 Kullanıcı: "aynı isimde birden fazla dosya var mı"
 Plan:
