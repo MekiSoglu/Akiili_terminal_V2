@@ -1,0 +1,101 @@
+{
+  "indexing": {
+    "scan_roots": [
+      "C:/Users/EXCALIBUR/Desktop"
+
+
+    ],
+    "allowed_extensions": [
+      ".py",
+      ".js",
+      ".ts",
+      ".java",
+      ".c",
+      ".cpp",
+      ".h",
+      ".cs",
+      ".html",
+      ".css",
+      ".json",
+      ".xml",
+      ".yaml",
+      ".yml",
+      ".toml",
+      ".txt",
+      ".md",
+      ".rst",
+      ".log",
+      ".csv",
+      ".pdf",
+      ".doc",
+      ".docx",
+      ".xls",
+      ".xlsx",
+      ".ppt",
+      ".pptx",
+      ".png",
+      ".jpg",
+      ".jpeg",
+      ".gif",
+      ".svg",
+      ".ico",
+      ".bmp",
+      ".mp3",
+      ".mp4",
+      ".avi",
+      ".mkv",
+      ".wav",
+      ".flac",
+      ".zip",
+      ".rar",
+      ".7z",
+      ".tar",
+      ".gz",
+      ".exe",
+      ".msi",
+      ".bat",
+      ".sh",
+      ".ps1",
+      ".sql",
+      ".db",
+      ".sqlite",
+      ".env",
+      ".ini",
+      ".cfg",
+      ".conf"
+    ],
+    "blacklist_dirs": [
+      "node_modules",
+      ".git",
+      "__pycache__",
+      "data",
+      "data/"
+    ],
+    "blacklist_patterns": [
+      "*.tmp",
+      "*.cache",
+      "~*",
+      "thumbs.db",
+      "desktop.ini"
+    ],
+    "max_depth": 15,
+    "index_hidden_files": false,
+    "follow_symlinks": false
+  },
+  "database": {
+    "path": "data/file_index.db",
+    "journal_mode": "WAL",
+    "cache_size_mb": 64,
+    "busy_timeout_ms": 5000
+  },
+  "llm": {
+    "base_url": "http://localhost:11434",
+    "model": "qwen2.5-coder:7b",
+    "temperature": 0.1,
+    "max_retries": 2
+  },
+  "watcher": {
+    "enabled": true,
+    "debounce_seconds": 2
+  }
+}
