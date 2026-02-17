@@ -2,9 +2,9 @@
 ModuleRegistry - Modül Yöneticisi.
 
 modules/ klasörünü tarar, BaseModule'den türeyen sınıfları
-otomatik bulur ve kaydeder. Yeni modül = yeni dosya, başka bir şey gerekmez.
+otomatik bulur ve kaydeder.
 """
-
+from __future__ import annotations
 import os
 import sys
 import importlib
@@ -13,6 +13,7 @@ import inspect
 import logging
 from pathlib import Path
 from core.BaseModule import BaseModule
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,18 +33,13 @@ class ModuleRegistry:
         self._modules: dict[str, BaseModule] = {}
 
     def discover(self):
-        """
-        modules/ klasörünü tarar ve BaseModule'den türeyen
-        tüm sınıfları otomatik kaydeder.
-        """
         if not self.modules_dir.exists():
             logger.warning(f"Modül dizini bulunamadı: {self.modules_dir}")
             return
 
-        for file in self.modules_dir.glob("*.py"):
+        for file in self.modules_dir.rglob("*.py"):
             if file.name.startswith("_"):
                 continue
-
             self._load_module_file(file)
 
         logger.info(f"{len(self._modules)} modül yüklendi: {list(self._modules.keys())}")
@@ -69,9 +65,12 @@ class ModuleRegistry:
                     instance = obj()
                     self._modules[instance.metadata.name] = instance
                     logger.info(f"Modül yüklendi: {instance.metadata.name}")
-
         except Exception as e:
+            import traceback
             logger.error(f"Modül yükleme hatası ({file_path.name}): {e}")
+            logger.error(traceback.format_exc())
+
+
 
     def get(self, module_name: str) -> BaseModule | None:
         """İsme göre modül getir."""
@@ -83,21 +82,14 @@ class ModuleRegistry:
         Router prompt'u için kullanılır.
         """
         return [
-            {
-                "name": mod.metadata.name,
-                "description": mod.metadata.description,
-            }
+            {"name": mod.metadata.name, "description": mod.metadata.description}
             for mod in self._modules.values()
         ]
 
-    def get_module_prompt_data(self, module_name: str) -> dict | None:
-        """
-        Belirli bir modülün detaylı prompt verisini döner.
-        Planlayıcı prompt'u için kullanılır.
-        """
+    def get_module_prompt_data(self, module_name: str, category: str = None) -> dict | None:
         module = self.get(module_name)
         if module:
-            return module.to_prompt_dict()
+            return module.to_prompt_dict(category)
         return None
 
     @property

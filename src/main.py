@@ -1,5 +1,6 @@
 
-
+import ctypes
+import sys
 """
 Smart Terminal - Ana Giris Noktasi
 
@@ -12,11 +13,13 @@ Kullanim:
 
 import sys
 import logging
+from core.ModuleRegistry import ModuleRegistry
 
 from src.OutputFormat.file_operations import OutputFormatter
 from src.indexing.Database import Database
 from src.indexing.FileIndexer import FileIndexer
 from src.llm.Brain import Brain
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,6 +42,27 @@ def main():
 
     commands[sys.argv[1]]()
 
+def is_admin():
+    try:
+        import ctypes
+        shell32 = getattr(ctypes, "windll").shell32
+        if not shell32.IsUserAnAdmin():
+            print("⚠ Yönetici modunda değilsiniz. Bazı ağ işlemleri çalışmayabilir.")
+            print("  Tam yetki için terminali yönetici olarak başlatın.\n")
+    except Exception:
+        pass
+
+if not is_admin():
+    try:
+        import ctypes
+
+        shell32 = getattr(ctypes, "windll").shell32
+        if not shell32.IsUserAnAdmin():
+            print("⚠ Yönetici modunda değilsiniz. Bazı ağ işlemleri çalışmayabilir.")
+            print("  Tam yetki için terminali yönetici olarak başlatın.\n")
+    except Exception:
+        pass
+
 
 def cmd_index():
     indexer = FileIndexer(CONFIG)
@@ -53,6 +77,15 @@ def cmd_run():
         return
 
     try:
+        import ctypes
+        is_admin = ctypes.windll.shell32.IsUserAnAdmin()  # type: ignore
+        if not is_admin:
+            print("⚠ Yönetici modunda değilsiniz. Bazı ağ işlemleri çalışmayabilir.")
+            print("  Tam yetki için terminali yönetici olarak başlatın.\n")
+    except Exception:
+        pass
+
+    try:
         indexer = FileIndexer(CONFIG)
         from indexing.FileWatcher import FileWatcher
         watcher = FileWatcher(indexer, CONFIG)
@@ -64,6 +97,12 @@ def cmd_run():
 
     brain = Brain(CONFIG)
     brain.initialize()
+
+    registry = ModuleRegistry()
+    print(f"Modules dir: {registry.modules_dir}")
+    print(f"Bulunan dosyalar: {list(registry.modules_dir.glob('*.py'))}")
+
+    print(f"Exists: {registry.modules_dir.exists()}")
 
     print("\nSmart Terminal hazir. Cikmak icin 'exit' yazin.\n")
 

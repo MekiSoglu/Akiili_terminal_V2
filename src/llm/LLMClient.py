@@ -26,7 +26,7 @@ class LLMClient:
 
         llm_config = config.get("llm", {})
         self.base_url = llm_config.get("base_url", "http://localhost:11434")
-        self.model = llm_config.get("model", "qwen2.5-coder:7b")
+        self.model = llm_config.get("model", "qwen2.5:14b")
         self.temperature = llm_config.get("temperature", 0.1)
         self.max_retries = llm_config.get("max_retries", 2)
 

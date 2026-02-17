@@ -1,12 +1,12 @@
 """
 Brain - Akıllı Terminal Beyni.
 
-İki aşamalı LLM çağrısı:
-    1. Router: Kullanıcı isteğini doğru modüle yönlendir
-    2. Planner: Seçilen modülün araçlarıyla plan üret
+Akış:
+    1. Router: Kullanıcı isteğini modüle yönlendir
+    2. Alt Router : Alt kategoriye yönlendir 3 katmanlı llm
+    3. Planner: Seçilen araçlarla plan üret
 
 Brain iş yapmaz, sadece düşünür ve plan üretir.
-Planın yürütülmesi PlanExecutor'ın işi.
 """
 
 import logging
@@ -44,10 +44,9 @@ class Brain:
 
     def process(self, user_input: str) -> PlanResult:
         """
-        Kullanıcı girdisini al, sonuç döndür.
-        Tüm akış burada koordine edilir.
+        Kullanıcı inputunu al, cevap döndür.
         """
-        # Aşama 1: Hangi modül?
+        #  1: Hangi modül
         module_name = self._route(user_input)
 
         if not module_name:
@@ -66,8 +65,19 @@ class Brain:
 
         logger.info(f"Yönlendirme: {module_name}")
 
-        # Aşama 2: Plan üret
-        plan = self._plan(user_input, module_name)
+        # 2: Alt kategori varsa seç 3 katmanlı llm
+        category = None
+        if module.has_subcategories:
+            category = self._route_subcategory(user_input, module)
+            if not category:
+                return PlanResult(
+                    success=False,
+                    message="Alt kategori belirlenemedi.",
+                )
+            logger.info(f"Alt kategori: {category}")
+
+        #  3: Plan üret
+        plan = self._plan(user_input, module_name, category)
 
         if not plan:
             return PlanResult(
@@ -75,67 +85,101 @@ class Brain:
                 message="İşlem planı oluşturulamadı.",
             )
 
-       # logger.info(f"Plan: {len(plan)} adım")
+        logger.info(f"Plan: {len(plan)} adım")
 
-        # Aşama 3: Planı çalıştır
+        # Aşama 4: Planı çalıştır
         result = self.executor.execute(plan, module)
 
         return result
 
+
     def _route(self, user_input: str) -> str | None:
-        """
-        Aşama 1: Kullanıcı isteğini doğru modüle yönlendir.
-        Kısa prompt, kısa cevap.
-        """
         modules_summary = self.registry.list_modules()
 
         if not modules_summary:
             logger.error("Hiç modül yüklü değil.")
             return None
 
-        # Tek modül varsa direkt onu seç (LLM çağrısına gerek yok)
         if len(modules_summary) == 1:
             return modules_summary[0]["name"]
 
+        # geçici çözüm
+        NETWORK_OVERRIDES = ["hosts", "dns", "ping", "arp", "firewall", "vpn", "proxy", "traceroute"]
+
+        user_lower = user_input.lower()
+        for kw in NETWORK_OVERRIDES:
+            if kw in user_lower and "network_operations" in self.registry.module_names:
+                logger.info(f"Override routing: network_operations ({kw})")
+                return "network_operations"
+
+        # Eşleşme yoksa LLM'e sor
         prompt = self.prompts.get_router_prompt(modules_summary, user_input)
         response = self.llm.ask(prompt)
-       # logger.info(f"LLM Plan: {response}")
 
         if response and "module" in response:
             selected = response["module"]
-            # Modül gerçekten var mı kontrol et
             if selected in self.registry.module_names:
                 return selected
             logger.warning(f"LLM var olmayan modül seçti: {selected}")
 
         return None
 
-    def _plan(self, user_input: str, module_name: str) -> list[dict] | None:
-        """
-        Aşama 2: Seçilen modülün araçlarıyla plan üret.
-        Detaylı prompt, JSON plan çıktısı.
-        """
-        tools_data = self.registry.get_module_prompt_data(module_name)
+    def _route_subcategory(self, user_input: str, module) -> str | None:
+        """Alt kategori seçimi. Modülün subcategories'ini kullanır."""
+        subcategories = module.subcategories_summary()
+
+        if not subcategories:
+            return None
+
+        # Tek kategori varsa direkt seç
+        if len(subcategories) == 1:
+            return subcategories[0]["name"]
+
+        prompt = self.prompts.get_subcategory_prompt(subcategories, user_input)
+        response = self.llm.ask(prompt)
+
+        if response and "category" in response:
+            selected = response["category"]
+            valid_names = [sc["name"] for sc in subcategories]
+            if selected in valid_names:
+                return selected
+            # Fuzzy eşleşme
+            for name in valid_names:
+                if selected in name or name in selected:
+                    return name
+            logger.warning(f"LLM var olmayan kategori seçti: {selected}")
+
+        return None
+
+    def _plan(self, user_input: str, module_name: str, category: str = None) -> list[dict] | None:
+        # Önce keyword eşleşmesi dene
+        module = self.registry.get(module_name)
+        if hasattr(module, 'match_tool_by_keywords'):
+            matched = module.match_tool_by_keywords(user_input)
+            if matched:
+                logger.info(f"Keyword eşleşmesi: {matched}")
+                return [{"tool": matched, "params": {}}]
+
+        # Eşleşme yoksa LLM'e sor
+        tools_data = self.registry.get_module_prompt_data(module_name, category)
 
         if not tools_data:
             return None
 
-        prompt = self.prompts.get_planner_prompt(module_name, tools_data, user_input)
+        prompt_name = f"{module_name}_{category}" if category else module_name
+        prompt = self.prompts.get_planner_prompt(prompt_name, tools_data, user_input)
         response = self.llm.ask(prompt)
-       # logger.info(f"LLM Plan: {response}")
+        logger.info(f"Prompt adı: {prompt_name}")
 
         if not response:
             return None
 
-        # Plan formatı: {"steps": [...]} veya direkt [...]
         if isinstance(response, list):
             return response
         elif isinstance(response, dict) and "steps" in response:
             return response["steps"]
 
         logger.warning(f"Beklenmeyen plan formatı: {type(response)}")
-       # logger.info(f"LLM Plan: {response}")
-
         return None
 
     @staticmethod

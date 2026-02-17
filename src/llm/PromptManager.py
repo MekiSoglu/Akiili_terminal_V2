@@ -6,8 +6,8 @@ Router prompt'u ve modüle özel planlayıcı prompt'unu yükler.
 """
 
 import json
-import logging
 import os
+import logging
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -42,12 +42,24 @@ class PromptManager:
             user_input=user_input,
         )
 
-    def get_planner_prompt(self, module_name: str, tools_data: dict, user_input: str) -> str:
+    def get_subcategory_prompt(self, subcategories: list[dict], user_input: str) -> str:
+        template = self._load_template("subcategory_router")
+
+        categories_text = ""
+        for sc in subcategories:
+            categories_text += f'- {sc["name"]}: {sc["description"]}\n'
+
+        return template.format(
+            categories=categories_text.strip(),
+            user_input=user_input,
+        )
+
+    def get_planner_prompt(self, prompt_name: str, tools_data: dict, user_input: str) -> str:
         """
         Modüle özel planlayıcı prompt'unu oluşturur.
         Modülün araçları + kullanıcı girdisi ile birleştirir.
         """
-        template = self._load_template(module_name)
+        template = self._load_template(prompt_name) # her modülün özel promtunu alır
 
         tools_text = json.dumps(tools_data["tools"], ensure_ascii=False, indent=2)
 
@@ -74,6 +86,12 @@ class PromptManager:
                 "Mevcut modüller:\n{modules}\n\n"
                 "Kullanıcı isteği: {user_input}\n\n"
                 'Sadece en uygun modül adını JSON olarak döndür: {{"module": "modül_adı"}}'
+            )
+        if name == "subcategory_router":
+            return (
+                "Mevcut kategoriler:\n{categories}\n\n"
+                "Kullanıcı isteği: {user_input}\n\n"
+                'Sadece en uygun kategori adını JSON olarak döndür: {{"category": "kategori_adı"}}'
             )
         return (
             "Mevcut araçlar:\n{tools}\n\n"

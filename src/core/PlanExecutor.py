@@ -104,6 +104,7 @@ class PlanExecutor:
                 return plan_result
 
             # 3. Tehlike seviyesi kontrolü
+
             if not self._check_danger_level(tool_def, tool_name, params):
                 step_result = StepResult(
                     step_number=step_num,
