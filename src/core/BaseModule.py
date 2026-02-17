@@ -6,11 +6,15 @@ Yeni modül eklemek için:
     2. BaseModule'den türet
     3. metadata ve tools tanımla
     4. Otomatik olarak sisteme dahil olur
+
+Alt kategorili modüller için:
+    - subcategories property'sini override et
+    - get_tools_for_category ile kategori bazlı araç döndür
 """
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import cast, Callable, Any
 
 
 @dataclass
@@ -30,6 +34,14 @@ class Tool:
     description: str
     params: list[ToolParam] = field(default_factory=list)
     danger_level: str = "safe"  # "safe", "confirm", "dangerous"
+    category: str = ""
+
+
+@dataclass
+class Subcategory:
+    """Alt kategori tanımı."""
+    name: str
+    description: str
 
 
 @dataclass
@@ -44,32 +56,44 @@ class BaseModule(ABC):
     """
     Tüm modüllerin extend edeceği temel sınıf.
 
-    Her modül şunları tanımlamalı:
-        - metadata: Modül adı ve açıklaması
-        - tools: Sunduğu araçlar listesi
-        - Her araç için aynı isimde bir metot
+    Basit modüller: tools property'si yeterli.
+    Alt kategorili modüller: subcategories + get_tools_for_category override edilir.
     """
 
     @property
     @abstractmethod
     def metadata(self) -> ModuleMetadata:
-        """Modül kimlik bilgisi."""
         pass
 
     @property
     @abstractmethod
     def tools(self) -> list[Tool]:
-        """Modülün sunduğu araçlar."""
         pass
 
+    @property
+    def subcategories(self) -> list[Subcategory]:
+        """Alt kategoriler. Varsayılan: boş (alt kategori yok)."""
+        return []
+
+    @property
+    def has_subcategories(self) -> bool:
+        return len(self.subcategories) > 0
+
+    def get_tools_for_category(self, category: str) -> list[Tool]:
+        """Belirli bir kategorideki araçları döndür."""
+        return [t for t in self.tools if t.category == category]
+
     def execute(self, tool_name: str, params: dict) -> dict:
+        """Araç adına göre ilgili metodu çağırır."""
         tool = self.get_tool(tool_name)
         if tool:
-            tool_name = tool.name  # Düzeltilmiş adı kullan
+            tool_name = tool.name
 
-        method = getattr(self, tool_name, None)
+        method = cast(Callable[..., dict], getattr(self, tool_name, None))
+
         if method is None or not callable(method):
             return {"success": False, "error": f"Araç bulunamadı: {tool_name}"}
+
         try:
             result = method(**params)
             return result
@@ -79,6 +103,7 @@ class BaseModule(ABC):
             return {"success": False, "error": f"Çalışma hatası: {str(e)}"}
 
     def get_tool(self, tool_name: str) -> Tool | None:
+     #llm halisülasyon görüp tool isimlerini değişitirise
         # Önce tam eşleşme
         for tool in self.tools:
             if tool.name == tool_name:
@@ -91,8 +116,8 @@ class BaseModule(ABC):
 
     def validate_params(self, tool_name: str, params: dict) -> dict:
         """
-        Parametreleri çalıştırmadan önce doğrula.
-        Eksik zorunlu parametre var mı? Tip doğru mu?
+        bir aracın çalışması için olmazsa olmaz (zorunlu)
+         olan verilerin kullanıcı tarafından gönderilip gönderilmediği denetlenir
         """
         tool = self.get_tool(tool_name)
         if not tool:
@@ -109,14 +134,22 @@ class BaseModule(ABC):
 
         return {"valid": True}
 
-    def to_prompt_dict(self) -> dict:
+    def to_prompt_dict(self, category: str = None) -> dict:
         """
         LLM prompt'una gömülecek format.
         Modülün tüm araçlarını ve parametrelerini
         LLM'in anlayacağı formatta döner.
+        category verilirse sadece o kategorinin araçlarını döner.
         """
+        if category:
+            # category verilirse sadece o kategorinin araçlarını döner. 3 katmanlı llm
+            tools = self.get_tools_for_category(category)
+        else:
+            # alt kategori yoksa var olan tüm araçları dön . 2 katmanlı llm
+            tools = self.tools
+
         tools_list = []
-        for tool in self.tools:
+        for tool in tools:
             tool_dict = {
                 "name": tool.name,
                 "description": tool.description,
@@ -137,3 +170,10 @@ class BaseModule(ABC):
             "description": self.metadata.description,
             "tools": tools_list,
         }
+
+    def subcategories_summary(self) -> list[dict]:
+        """Alt kategori listesi (router prompt için)."""
+        return [
+            {"name": sc.name, "description": sc.description}
+            for sc in self.subcategories
+        ]
