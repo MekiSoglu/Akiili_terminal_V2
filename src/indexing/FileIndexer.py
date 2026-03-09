@@ -45,16 +45,51 @@ class FileIndexer:
     # FILTRELEME
     # ================================================================
 
+    # Daima atlanan dizinler (config'ten bağımsız)
+    _ALWAYS_BLACKLIST = {
+        "node_modules",
+        "__pycache__",
+        ".git",
+        ".svn",
+        ".hg",
+        ".idea",
+        ".vscode",
+        ".vs",
+        "dist",
+        "build",
+        "venv",
+        ".venv",
+        "env",
+        ".env",
+        "site-packages",
+        "egg-info",
+        ".tox",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "Lib",  # Windows Python venv/Lib
+    }
+
     def _is_blacklisted_dir(self, dir_name: str, full_path: str) -> bool:
         """Dizin kara listede mi kontrol et."""
-        # Direkt isim kontrolü
+        name_lower = dir_name.lower()
+
+        # 1) Dahili kara liste (her zaman)
+        if name_lower in {b.lower() for b in self._ALWAYS_BLACKLIST}:
+            return True
+
+        # 2) Config kara liste
         if dir_name in self.blacklist_dirs:
             return True
-        # Path içinde kara liste dizini var mı
-        path_str = full_path.replace("\\", "/")
-        for bl in self.blacklist_dirs:
-            if f"/{bl}/" in path_str or path_str.endswith(f"/{bl}"):
+
+        # 3) Path segmentlerinde kara liste kontrolü
+        path_str = full_path.replace("\\", "/").lower()
+        all_blacklist = self.blacklist_dirs | self._ALWAYS_BLACKLIST
+        for bl in all_blacklist:
+            bl_lower = bl.lower().rstrip("/")
+            if f"/{bl_lower}/" in path_str or path_str.endswith(f"/{bl_lower}"):
                 return True
+
         return False
 
     def _is_blacklisted_file(self, file_name: str) -> bool:
@@ -126,7 +161,9 @@ class FileIndexer:
 
         return self._stats
 
-    def _scan_directory(self, conn, dir_path: Path, parent_id: Optional[int], depth: int):
+    def _scan_directory(
+        self, conn, dir_path: Path, parent_id: Optional[int], depth: int
+    ):
         """Tek bir dizini recursive tarar."""
         if depth > self.max_depth:
             return
@@ -140,7 +177,11 @@ class FileIndexer:
             return
 
         # Gizli klasör kontrolü
-        if not self.index_hidden and self._is_hidden(dir_name) and parent_id is not None:
+        if (
+            not self.index_hidden
+            and self._is_hidden(dir_name)
+            and parent_id is not None
+        ):
             self._stats["skipped"] += 1
             return
 
@@ -158,15 +199,14 @@ class FileIndexer:
                     depth,
                     stat.st_ctime,
                     stat.st_mtime,
-                )
+                ),
             )
             dir_id = cur.lastrowid
 
             # IGNORE durumunda lastrowid 0 döner, mevcut ID'yi al
             if dir_id == 0:
                 row = conn.execute(
-                    "SELECT id FROM directories WHERE full_path = ?",
-                    (full_path_str,)
+                    "SELECT id FROM directories WHERE full_path = ?", (full_path_str,)
                 ).fetchone()
                 dir_id = row["id"] if row else None
                 if not dir_id:
@@ -208,16 +248,18 @@ class FileIndexer:
 
                     try:
                         fstat = entry.stat(follow_symlinks=self.follow_symlinks)
-                        file_batch.append((
-                            file_name,
-                            ext,
-                            str(entry),
-                            dir_id,
-                            fstat.st_size,
-                            fstat.st_ctime,
-                            fstat.st_mtime,
-                            1 if self._is_hidden(entry.name) else 0
-                        ))
+                        file_batch.append(
+                            (
+                                file_name,
+                                ext,
+                                str(entry),
+                                dir_id,
+                                fstat.st_size,
+                                fstat.st_ctime,
+                                fstat.st_mtime,
+                                1 if self._is_hidden(entry.name) else 0,
+                            )
+                        )
                     except (PermissionError, OSError):
                         self._stats["errors"] += 1
 
@@ -232,7 +274,7 @@ class FileIndexer:
                    (name, extension, full_path, directory_id, size_bytes,
                     created_at, modified_at, is_hidden)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                file_batch
+                file_batch,
             )
             self._stats["files"] += len(file_batch)
 
@@ -281,7 +323,7 @@ class FileIndexer:
                         stat.st_ctime,
                         stat.st_mtime,
                         1 if self._is_hidden(path.name) else 0,
-                    )
+                    ),
                 )
         except (PermissionError, OSError) as e:
             logger.error(f"Dosya güncelleme hatası: {file_path} -> {e}")
@@ -310,21 +352,29 @@ class FileIndexer:
             if row:
                 dir_id = row["id"]
                 # Alt dizinleri recursive bul (CTE)
-                sub_dirs = conn.execute("""
+                sub_dirs = conn.execute(
+                    """
                     WITH RECURSIVE sub AS (
                         SELECT id FROM directories WHERE id = ?
                         UNION ALL
                         SELECT d.id FROM directories d JOIN sub s ON d.parent_id = s.id
                     )
                     SELECT id FROM sub
-                """, (dir_id,)).fetchall()
+                """,
+                    (dir_id,),
+                ).fetchall()
 
                 dir_ids = [r["id"] for r in sub_dirs]
 
                 if dir_ids:
                     placeholders = ",".join("?" * len(dir_ids))
-                    conn.execute(f"DELETE FROM files WHERE directory_id IN ({placeholders})", dir_ids)
-                    conn.execute(f"DELETE FROM directories WHERE id IN ({placeholders})", dir_ids)
+                    conn.execute(
+                        f"DELETE FROM files WHERE directory_id IN ({placeholders})",
+                        dir_ids,
+                    )
+                    conn.execute(
+                        f"DELETE FROM directories WHERE id IN ({placeholders})", dir_ids
+                    )
 
     def _ensure_directory(self, dir_path: Path) -> Optional[int]:
         """Dizinin DB'de var olmasını garanti et, yoksa oluştur."""
@@ -355,7 +405,7 @@ class FileIndexer:
                         depth,
                         stat.st_ctime,
                         stat.st_mtime,
-                    )
+                    ),
                 )
                 return cur.lastrowid or conn.execute(
                     "SELECT id FROM directories WHERE full_path = ?",

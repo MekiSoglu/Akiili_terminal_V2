@@ -2,8 +2,6 @@
   "indexing": {
     "scan_roots": [
       "C:/Users/EXCALIBUR/Desktop"
-
-
     ],
     "allowed_extensions": [
       ".py",
@@ -65,11 +63,21 @@
       ".conf"
     ],
     "blacklist_dirs": [
-      "node_modules",
+      ".env",
       ".git",
+      ".idea",
+      ".venv",
+      ".vscode",
       "__pycache__",
+      "build",
       "data",
-      "data/"
+      "data/",
+      "dist",
+      "egg-info",
+      "env",
+      "node_modules",
+      "site-packages",
+      "venv"
     ],
     "blacklist_patterns": [
       "*.tmp",
