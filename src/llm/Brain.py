@@ -1,186 +1,263 @@
 """
-Brain - Akıllı Terminal Beyni.
+Brain - Akıllı Terminal Beyni v2 (DAG Tabanlı).
 
-Akış:
-    1. Router: Kullanıcı isteğini modüle yönlendir
-    2. Alt Router : Alt kategoriye yönlendir 3 katmanlı llm
-    3. Planner: Seçilen araçlarla plan üret
+ESKİ AKIŞ (3 LLM çağrısı):
+    1. Router LLM → hangi modül
+    2. Subcategory LLM → hangi alt kategori
+    3. Planner LLM → plan üret
 
-Brain iş yapmaz, sadece düşünür ve plan üretir.
+YENİ AKIŞ (1 LLM çağrısı):
+    1. estimate_complexity() → regex, 0ms
+    2. ChromaDB araç ara → embedding, 30ms
+    3. LLM DAG üret → 1 çağrı, model otomatik seçilir
+    4. DAGExecutor çalıştır
 """
 
 import logging
-from core.ModuleRegistry import ModuleRegistry
-from core.PlanExecutor import PlanExecutor
-from llm.LLMClient import LLMClient
-from llm.PromptManager import PromptManager
 
-from src.core.PlanExecutor import PlanResult
+from src.core.Dagexecutor import DAGExecutor, DAGResult
+from src.core.ModuleRegistry import ModuleRegistry
+from src.llm.LLMClient import LLMClient
+from src.llm.Prompts import build_dag_prompt
+from src.tools.Tool_registry import TOOL_REGISTRY
+from src.tools.tool_selector import get_tool_selector, estimate_complexity
 
 logger = logging.getLogger(__name__)
 
 
+# ══════════════════════════════════════════════════════
+# DAG Prompt Builder — prompts.py'den import
+# ══════════════════════════════════════════════════════
+
+
+def _validate_dag(dag: dict, tool_ids: set) -> dict:
+    """DAG doğrulama."""
+    issues = []
+    warnings = []
+    tasks = dag.get("tasks", [])
+
+    if not tasks:
+        return {"valid": False, "issues": ["Görev listesi boş"]}
+
+    task_ids = set()
+    for task in tasks:
+        tid = task.get("id", "?")
+        tool = task.get("tool", "")
+        task_type = task.get("type", "")
+
+        if tid in task_ids:
+            issues.append(f"Tekrar eden ID: {tid}")
+        task_ids.add(tid)
+
+        # foreach kontrolü
+        if task_type == "foreach":
+            if tool and tool not in tool_ids:
+                issues.append(f"{tid}: foreach içinde var olmayan araç '{tool}'")
+            if not task.get("items"):
+                issues.append(f"{tid}: foreach için 'items' eksik")
+        elif tool == "foreach":
+            warnings.append(f"{tid}: 'foreach' tool yerine type olmalı")
+            # Otomatik düzelt
+            task["type"] = "foreach"
+            task["tool"] = task.get("params", {}).get("tool", "")
+        elif tool and tool not in tool_ids:
+            issues.append(f"{tid}: Var olmayan araç '{tool}'")
+
+    # Bağımlılık kontrolü
+    all_ids = {t.get("id") for t in tasks}
+    for task in tasks:
+        for dep in task.get("depends_on", []):
+            if dep not in all_ids:
+                issues.append(f"{task.get('id')}: Bağımlılık '{dep}' mevcut değil")
+
+    return {"valid": len(issues) == 0, "issues": issues, "warnings": warnings}
+
+
+# ══════════════════════════════════════════════════════
+# Brain Sınıfı
+# ══════════════════════════════════════════════════════
+
+
 class Brain:
     """
-    Akıllı terminal beyni.
+    Akıllı terminal beyni v2.
 
     Kullanım:
         brain = Brain(config_path)
         brain.initialize()
-        result = brain.process("src klasöründeki .py dosyalarını bul")
+        result = brain.process("config.txt oku URL bul ping at")
     """
+
+    # Complexity → Text-Gen-WebUI model eşlemesi
+    MODEL_MAP = {
+        "7b": "qwen2.5-coder:7b",
+        "8b": "deepseek-r1:8b",
+        "12b": "gemma3:12b",
+    }
 
     def __init__(self, config_path: str = "config.json"):
         self.config_path = config_path
         self.llm = LLMClient(config_path)
         self.registry = ModuleRegistry()
-        self.prompts = PromptManager()
-        self.executor = PlanExecutor(confirm_callback=self._ask_user_confirmation)
+        self.tool_selector = get_tool_selector()
+        self.dag_executor = None
 
     def initialize(self):
-        """Modülleri yükle. Uygulama başlangıcında bir kez çağrılır."""
+        """Modülleri ve araç seçiciyi yükle. Başlangıçta bir kez çağrılır."""
+        # 1. Modülleri yükle
         self.registry.discover()
-        logger.info(f"Brain hazır. {self.registry.count} modül aktif.")
+        logger.info(f"Modüller hazır: {self.registry.count} modül")
 
-    def process(self, user_input: str) -> PlanResult:
-        """
-        Kullanıcı inputunu al, cevap döndür.
-        """
-        #  1: Hangi modül
-        module_name = self._route(user_input)
+        # 2. ChromaDB + embedding modelini yükle
+        self.tool_selector.initialize()
 
-        if not module_name:
-            return PlanResult(
+        # 3. DAG executor oluştur
+        self.dag_executor = DAGExecutor(
+            module_registry=self.registry,
+            tool_registry_list=TOOL_REGISTRY,
+            confirm_callback=self._ask_user_confirmation,
+        )
+
+        logger.info("Brain v2 hazır (DAG tabanlı).")
+
+    def process(self, user_input: str) -> DAGResult:
+        """
+        Kullanıcı inputunu al → DAG üret → çalıştır → sonuç döndür.
+        """
+        # ── 1. Karmaşıklık tahmin (0ms) ──
+        complexity = estimate_complexity(user_input)
+        level = complexity["level"]  # simple / medium / hard / complex
+        model_key = complexity["model"]  # 1.5b / 4b / 8b / 12b
+        model_name = self.MODEL_MAP.get(model_key, self.MODEL_MAP.get("8b", ""))
+
+        d = complexity["details"]
+        print(
+            f"\n Karmaşıklık: {level} (W:{d['word_score']} S:{d['structural_score']} → {complexity['score']}) → {model_key}"
+        )
+        flags = []
+        if d.get("cross_module"):
+            flags.append("çapraz-modül")
+        if d.get("dynamic_target"):
+            flags.append("dinamik-hedef")
+        if d.get("iteration"):
+            flags.append("iterasyon")
+        if d.get("has_output"):
+            flags.append("çıktı-yazma")
+        if d.get("has_filter"):
+            flags.append("filtreleme")
+        if flags:
+            print(f" {', '.join(flags)}")
+
+        # ── 2. ChromaDB ile araç bul (30ms) ──
+        tools = self.tool_selector.search(user_input, top_k=10)
+
+        if not tools:
+            return DAGResult(
                 success=False,
-                message="İsteğinizi anlayamadım. Lütfen daha açık ifade edin.",
+                message="Uygun araç bulunamadı. Lütfen daha açık ifade edin.",
             )
 
-        module = self.registry.get(module_name)
+        tools_text = self.tool_selector.format_tools_for_llm(tools)
+        logger.info(f"ChromaDB: {len(tools)} araç bulundu")
 
-        if not module:
-            return PlanResult(
-                success=False,
-                message=f"'{module_name}' modülü bulunamadı.",
-            )
+        # ── 3. DAG üret — TEK LLM çağrısı ──
+        prompt = build_dag_prompt(user_input, tools_text, level)
+        dag = self._generate_dag(prompt, model_name)
 
-        logger.info(f"Yönlendirme: {module_name}")
+        # ── DAG DETAY LOG ──
+        if dag:
+            tasks = dag.get("tasks", [])
+            print(f"\n{'─' * 60}")
+            print(f" LLM DAG PLANI ({len(tasks)} adım)")
+            print(f"{'─' * 60}")
+            for t in tasks:
+                tid = t.get("id", "?")
+                tool = t.get("tool", "?")
+                ttype = t.get("type", "")
+                params = t.get("params", {})
+                deps = t.get("depends_on", [])
+                desc = t.get("desc", "")
+                items = t.get("items", "")
 
-        # 2: Alt kategori varsa seç 3 katmanlı llm
-        category = None
-        if module.has_subcategories:
-            category = self._route_subcategory(user_input, module)
-            if not category:
-                return PlanResult(
-                    success=False,
-                    message="Alt kategori belirlenemedi.",
-                )
-            logger.info(f"Alt kategori: {category}")
+                type_str = " [foreach]" if ttype == "foreach" else ""
+                deps_str = f" ← {deps}" if deps else ""
+                items_str = f" items={items}" if items else ""
 
-        #  3: Plan üret
-        plan = self._plan(user_input, module_name, category)
+                print(f"  {tid}: {tool}{type_str}{deps_str}")
+                if params:
+                    for k, v in params.items():
+                        print(f"      {k}: {v}")
+                if items_str:
+                    print(f"      {items_str}")
+                if desc:
+                    print(f"      ({desc})")
+            print(f"{'─' * 60}\n")
 
-        if not plan:
-            return PlanResult(
+        if dag is None:
+            return DAGResult(
                 success=False,
                 message="İşlem planı oluşturulamadı.",
             )
 
-        logger.info(f"Plan: {len(plan)} adım")
+        # ── 4. Doğrula ──
+        tool_ids = {t["id"] for t in TOOL_REGISTRY}
+        validation = _validate_dag(dag, tool_ids)
 
-        # Aşama 4: Planı çalıştır
-        result = self.executor.execute(plan, module)
+        if not validation["valid"]:
+            logger.warning(f"DAG doğrulama hatası: {validation['issues']}")
+            # Retry — bir kez daha dene
+            logger.info("Retry: DAG tekrar üretiliyor...")
+            dag = self._generate_dag(prompt, model_name)
+            if dag:
+                validation = _validate_dag(dag, tool_ids)
 
+            if not dag or not validation["valid"]:
+                return DAGResult(
+                    success=False,
+                    message=f"Geçersiz plan: {'; '.join(validation.get('issues', ['?']))}",
+                )
+
+        if validation.get("warnings"):
+            for w in validation["warnings"]:
+                logger.warning(f"DAG uyarı: {w}")
+
+        tasks = dag.get("tasks", [])
+        task_tools = [t.get("tool", "?") for t in tasks]
+        logger.info(f"DAG: {len(tasks)} adım → {task_tools}")
+
+        # ── 5. DAG çalıştır ──
+        result = self.dag_executor.execute(dag)
         return result
 
+    # ══════════════════════════════════════════════════════
+    # LLM DAG ÜRETİMİ
+    # ══════════════════════════════════════════════════════
 
-    def _route(self, user_input: str) -> str | None:
-        modules_summary = self.registry.list_modules()
-
-        if not modules_summary:
-            logger.error("Hiç modül yüklü değil.")
-            return None
-
-        if len(modules_summary) == 1:
-            return modules_summary[0]["name"]
-
-        # geçici çözüm
-        NETWORK_OVERRIDES = ["hosts", "dns", "ping", "arp", "firewall", "vpn", "proxy", "traceroute"]
-
-        user_lower = user_input.lower()
-        for kw in NETWORK_OVERRIDES:
-            if kw in user_lower and "network_operations" in self.registry.module_names:
-                logger.info(f"Override routing: network_operations ({kw})")
-                return "network_operations"
-
-        # Eşleşme yoksa LLM'e sor
-        prompt = self.prompts.get_router_prompt(modules_summary, user_input)
-        response = self.llm.ask(prompt)
-
-        if response and "module" in response:
-            selected = response["module"]
-            if selected in self.registry.module_names:
-                return selected
-            logger.warning(f"LLM var olmayan modül seçti: {selected}")
-
-        return None
-
-    def _route_subcategory(self, user_input: str, module) -> str | None:
-        """Alt kategori seçimi. Modülün subcategories'ini kullanır."""
-        subcategories = module.subcategories_summary()
-
-        if not subcategories:
-            return None
-
-        # Tek kategori varsa direkt seç
-        if len(subcategories) == 1:
-            return subcategories[0]["name"]
-
-        prompt = self.prompts.get_subcategory_prompt(subcategories, user_input)
-        response = self.llm.ask(prompt)
-
-        if response and "category" in response:
-            selected = response["category"]
-            valid_names = [sc["name"] for sc in subcategories]
-            if selected in valid_names:
-                return selected
-            # Fuzzy eşleşme
-            for name in valid_names:
-                if selected in name or name in selected:
-                    return name
-            logger.warning(f"LLM var olmayan kategori seçti: {selected}")
-
-        return None
-
-    def _plan(self, user_input: str, module_name: str, category: str = None) -> list[dict] | None:
-        # Önce keyword eşleşmesi dene
-        module = self.registry.get(module_name)
-        if hasattr(module, 'match_tool_by_keywords'):
-            matched = module.match_tool_by_keywords(user_input)
-            if matched:
-                logger.info(f"Keyword eşleşmesi: {matched}")
-                return [{"tool": matched, "params": {}}]
-
-        # Eşleşme yoksa LLM'e sor
-        tools_data = self.registry.get_module_prompt_data(module_name, category)
-
-        if not tools_data:
-            return None
-
-        prompt_name = f"{module_name}_{category}" if category else module_name
-        prompt = self.prompts.get_planner_prompt(prompt_name, tools_data, user_input)
-        response = self.llm.ask(prompt)
-        logger.info(f"Prompt adı: {prompt_name}")
+    def _generate_dag(self, prompt: str, model_name: str) -> dict | None:
+        """LLM'den DAG JSON al."""
+        response = self.llm.ask(prompt, model=model_name)
 
         if not response:
             return None
 
-        if isinstance(response, list):
+        # {"tasks": [...]} formatında mı?
+        if isinstance(response, dict) and "tasks" in response:
             return response
-        elif isinstance(response, dict) and "steps" in response:
-            return response["steps"]
 
-        logger.warning(f"Beklenmeyen plan formatı: {type(response)}")
+        # {"steps": [...]} eski format desteği
+        if isinstance(response, dict) and "steps" in response:
+            return {"tasks": response["steps"]}
+
+        # Liste geldiyse tasks olarak sar
+        if isinstance(response, list):
+            return {"tasks": response}
+
+        logger.warning(f"Beklenmeyen DAG formatı: {type(response)}")
         return None
+
+    # ══════════════════════════════════════════════════════
+    # KULLANICI ONAY
+    # ══════════════════════════════════════════════════════
 
     @staticmethod
     def _ask_user_confirmation(tool_name: str, params: dict) -> bool:

@@ -1,25 +1,20 @@
-
-import ctypes
-import sys
 """
-Smart Terminal - Ana Giris Noktasi
+Smart Terminal v2 - Ana Giriş Noktası (DAG Tabanlı)
 
-Kullanim:
+Kullanım:
     python main.py index          # Dosya sistemini indeksle
     python main.py index --force  # Yeniden indeksle
-    python main.py run            # Uygulamayi baslat
-    python main.py stats          # Indeks istatistikleri
+    python main.py run            # Uygulamayı başlat
+    python main.py stats          # İndeks istatistikleri
 """
 
 import sys
 import logging
-from core.ModuleRegistry import ModuleRegistry
 
 from src.OutputFormat.file_operations import OutputFormatter
 from src.indexing.Database import Database
 from src.indexing.FileIndexer import FileIndexer
 from src.llm.Brain import Brain
-
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,17 +37,9 @@ def main():
 
     commands[sys.argv[1]]()
 
-def is_admin():
-    try:
-        import ctypes
-        shell32 = getattr(ctypes, "windll").shell32
-        if not shell32.IsUserAnAdmin():
-            print("⚠ Yönetici modunda değilsiniz. Bazı ağ işlemleri çalışmayabilir.")
-            print("  Tam yetki için terminali yönetici olarak başlatın.\n")
-    except Exception:
-        pass
 
-if not is_admin():
+def _check_admin():
+    """Windows yönetici kontrolü."""
     try:
         import ctypes
 
@@ -67,44 +54,36 @@ if not is_admin():
 def cmd_index():
     indexer = FileIndexer(CONFIG)
     stats = indexer.full_scan()
-    logging.info(f"Tamamlandi: {stats['files']} dosya, {stats['dirs']} dizin")
+    logging.info(f"Tamamlandı: {stats['files']} dosya, {stats['dirs']} dizin")
 
 
 def cmd_run():
     db = Database(CONFIG)
     if db.get_stats()["total_files"] == 0:
-        print("Indeks bos! Once calistirin: python main.py index")
+        print("İndeks boş! Önce çalıştırın: python main.py index")
         return
 
-    try:
-        import ctypes
-        is_admin = ctypes.windll.shell32.IsUserAnAdmin()  # type: ignore
-        if not is_admin:
-            print("⚠ Yönetici modunda değilsiniz. Bazı ağ işlemleri çalışmayabilir.")
-            print("  Tam yetki için terminali yönetici olarak başlatın.\n")
-    except Exception:
-        pass
+    _check_admin()
 
+    # Dosya izleyici
     try:
         indexer = FileIndexer(CONFIG)
         from indexing.FileWatcher import FileWatcher
+
         watcher = FileWatcher(indexer, CONFIG)
         watcher.start()
     except ImportError:
         logging.warning("watchdog yüklü değil, dosya izleme devre dışı.")
 
+    # Çıktı formatlayıcı
     formatter = OutputFormatter()
 
+    # Brain v2 — DAG tabanlı
     brain = Brain(CONFIG)
-    brain.initialize()
+    brain.initialize()  # Modüller + ChromaDB + embedding model yüklenir
 
-    registry = ModuleRegistry()
-    print(f"Modules dir: {registry.modules_dir}")
-    print(f"Bulunan dosyalar: {list(registry.modules_dir.glob('*.py'))}")
-
-    print(f"Exists: {registry.modules_dir.exists()}")
-
-    print("\nSmart Terminal hazir. Cikmak icin 'exit' yazin.\n")
+    print("\nSmart Terminal v2 hazır.")
+    print("   Çıkmak için 'exit' yazın.\n")
 
     while True:
         try:
@@ -120,7 +99,7 @@ def cmd_run():
         result = brain.process(user_input)
         formatter.display(result)
 
-    print("Cikis yapildi.")
+    print("Çıkış yapıldı.")
 
 
 def cmd_stats():
@@ -129,7 +108,7 @@ def cmd_stats():
     print(f"\n  Toplam dosya:   {stats['total_files']:,}")
     print(f"  Toplam dizin:   {stats['total_directories']:,}")
     print(f"  Toplam boyut:   {stats['total_size_gb']} GB")
-    print(f"  Son tarama:     {stats['last_full_scan'] or 'henuz yapilmadi'}\n")
+    print(f"  Son tarama:     {stats['last_full_scan'] or 'henüz yapılmadı'}\n")
 
 
 if __name__ == "__main__":
