@@ -2,7 +2,6 @@ import socket
 import subprocess
 import re
 
-from src.modules.network.Basictools import get_public_ip
 
 
 def _run(cmd, timeout=30):
@@ -96,7 +95,11 @@ def _enrich_ip_info(ip):
 
 
 def _enrich_ips_bulk(ip_list):
+
+
     """Birden fazla IP'yi toplu zenginleştir."""
+    from modules.network.Basictools import get_public_ip
+
     results = {}
     public_ips = [ip for ip in ip_list if not ip.startswith(("192.168.", "10.", "172.16.", "127."))]
     local_ips = [ip for ip in ip_list if ip.startswith(("192.168.", "10.", "172.16.", "127."))]
