@@ -459,6 +459,35 @@ class FileOperationsModule(BaseModule):
                 ],
                 danger_level="safe",
             ),
+            # --- DOSYA DÖNÜŞTÜRME ---
+            Tool(
+                name="convert_file",
+                description="Dosyayı farklı formata dönüştür. Orijinal dosya korunur, kopya üzerinde çalışır.",
+                params=[
+                    ToolParam(
+                        "source", "Kaynak dosya yolu veya adı", "string", required=True
+                    ),
+                    ToolParam(
+                        "target_format",
+                        "Hedef format (.pdf, .jpg, .png, .mp3, .wav, .mp4, .csv, .xlsx, .txt, .docx, .md, .html, .gif, .zip)",
+                        "string",
+                        required=True,
+                    ),
+                    ToolParam(
+                        "output_dir",
+                        "Çıktı dizini (varsayılan: kaynak dosyanın dizini)",
+                        "string",
+                        required=False,
+                    ),
+                    ToolParam(
+                        "quality",
+                        "Kalite (görsel: 1-100, ses bitrate: 128, 192, 320)",
+                        "number",
+                        required=False,
+                    ),
+                ],
+                danger_level="safe",
+            ),
         ]
 
     # ================================================================
@@ -1585,8 +1614,9 @@ class FileOperationsModule(BaseModule):
             "message": "Dosyalar aynı" if identical else "Dosyalar farklı",
         }
 
-    def get_directory_tree(self, path=None, dir_path=None, max_depth=3,
-                           **kwargs) -> dict:
+    def get_directory_tree(
+        self, path=None, dir_path=None, max_depth=3, **kwargs
+    ) -> dict:
         """Dizin ağacı — dinamik çözümleme."""
         raw = path or dir_path or self._extract_dir_param(kwargs)
         if not raw:
@@ -1600,6 +1630,542 @@ class FileOperationsModule(BaseModule):
         if "error" in result:
             return {"success": False, "error": result["error"]}
         return {"success": True, "data": result}
+
+    # ================================================================
+    # DOSYA DÖNÜŞTÜRME
+    # ================================================================
+
+    # Desteklenen dönüşüm çiftleri → handler metot adı
+    _CONVERTERS = {
+        # Doküman
+        (".txt", ".pdf"): "_conv_text_to_pdf",
+        (".md", ".pdf"): "_conv_text_to_pdf",
+        (".html", ".pdf"): "_conv_html_to_pdf",
+        (".csv", ".xlsx"): "_conv_csv_to_xlsx",
+        (".xlsx", ".csv"): "_conv_xlsx_to_csv",
+        (".txt", ".html"): "_conv_text_to_html",
+        (".md", ".html"): "_conv_md_to_html",
+        (".txt", ".md"): "_conv_rename_ext",
+        (".md", ".txt"): "_conv_rename_ext",
+        (".txt", ".docx"): "_conv_text_to_docx",
+        (".docx", ".txt"): "_conv_docx_to_txt",
+        (".docx", ".pdf"): "_conv_docx_to_pdf",
+        # Görsel
+        (".png", ".jpg"): "_conv_image",
+        (".jpg", ".png"): "_conv_image",
+        (".jpeg", ".png"): "_conv_image",
+        (".png", ".jpeg"): "_conv_image",
+        (".webp", ".png"): "_conv_image",
+        (".webp", ".jpg"): "_conv_image",
+        (".bmp", ".png"): "_conv_image",
+        (".bmp", ".jpg"): "_conv_image",
+        (".png", ".gif"): "_conv_image",
+        (".jpg", ".gif"): "_conv_image",
+        (".png", ".webp"): "_conv_image",
+        (".jpg", ".webp"): "_conv_image",
+        (".png", ".bmp"): "_conv_image",
+        # Ses
+        (".wav", ".mp3"): "_conv_audio",
+        (".mp3", ".wav"): "_conv_audio",
+        (".ogg", ".mp3"): "_conv_audio",
+        (".flac", ".mp3"): "_conv_audio",
+        (".m4a", ".mp3"): "_conv_audio",
+        (".mp3", ".ogg"): "_conv_audio",
+        (".wav", ".ogg"): "_conv_audio",
+        (".flac", ".wav"): "_conv_audio",
+        # Video
+        (".mp4", ".mp3"): "_conv_video_to_audio",
+        (".mp4", ".wav"): "_conv_video_to_audio",
+        (".mkv", ".mp4"): "_conv_video",
+        (".avi", ".mp4"): "_conv_video",
+        (".webm", ".mp4"): "_conv_video",
+        (".mov", ".mp4"): "_conv_video",
+        (".mp4", ".gif"): "_conv_video_to_gif",
+        # Sıkıştırma
+        (".zip", ".dir"): "_conv_unzip",  # özel: zip çıkar
+    }
+
+    def convert_file(
+        self,
+        source=None,
+        target_format=None,
+        output_dir=None,
+        quality=None,
+        path=None,
+        **kwargs,
+    ) -> dict:
+        """Dosyayı farklı formata dönüştür. Orijinal korunur, kopya üzerinde çalışır."""
+        source = source or path or kwargs.get("file_path") or kwargs.get("file")
+        target_format = target_format or kwargs.get("format") or kwargs.get("to")
+
+        if not source:
+            return {"success": False, "error": "Kaynak dosya belirtilmedi"}
+        if not target_format:
+            return {"success": False, "error": "Hedef format belirtilmedi"}
+
+        # Quality normalize — LLM bazen "high", "low" gibi string verir
+        if isinstance(quality, str):
+            _quality_map = {"high": 95, "medium": 75, "low": 50}
+            try:
+                quality = int(quality)
+            except ValueError:
+                quality = _quality_map.get(quality.lower())
+
+        # Hedef formatı normalize et
+        target_format = target_format.strip().lower()
+        if not target_format.startswith("."):
+            target_format = f".{target_format}"
+
+        # Kaynak dosyayı bul
+        resolved = self._resolve_file_path(source)
+
+        # _resolve_file_path bulamadıysa ek aramalar yap
+        if not resolved:
+            src_p = Path(source)
+
+            # 1) Göreceli yol olarak izlenen dizinlerde ara
+            #    "transform_test/test_resim.png" → Desktop/projeler/transform_test/test_resim.png
+            if "/" in source or "\\" in source:
+                # Parçalara ayır — son kısmı dosya adı, öncesi dizin
+                dir_part = str(src_p.parent)  # "transform_test"
+                file_name = src_p.name  # "test_resim.png"
+
+                resolved_dir = self._resolve_dir_path(dir_part)
+                if resolved_dir:
+                    candidate = Path(resolved_dir) / file_name
+                    if candidate.exists():
+                        resolved = str(candidate)
+
+            # 2) Sadece dosya adıyla search_files'ta ara
+            if not resolved and src_p.suffix:
+                results = self.query_engine.search_files(
+                    name=src_p.stem, extension=src_p.suffix, limit=5
+                )
+                if results:
+                    # Tam isim eşleşmesini tercih et
+                    target_name = src_p.name.lower()
+                    for r in results:
+                        r_name = f"{r.get('name', '')}{r.get('extension', '')}".lower()
+                        if r_name == target_name:
+                            resolved = r["full_path"]
+                            break
+                    # Tam eşleşme yoksa ilk sonucu al
+                    if not resolved:
+                        resolved = results[0]["full_path"]
+
+        if not resolved:
+            return {"success": False, "error": f"Kaynak dosya bulunamadı: {source}"}
+
+        src_path = Path(resolved)
+        src_ext = src_path.suffix.lower()
+
+        # Aynı format kontrolü
+        if src_ext == target_format:
+            return {
+                "success": False,
+                "error": f"Dosya zaten {target_format} formatında",
+            }
+
+        # Handler bul
+        handler_name = self._CONVERTERS.get((src_ext, target_format))
+        if not handler_name:
+            supported = self._get_supported_conversions(src_ext)
+            return {
+                "success": False,
+                "error": f"{src_ext} → {target_format} dönüşümü desteklenmiyor",
+                "supported": supported,
+            }
+
+        # Çıktı dizinini belirle
+        if output_dir:
+            out_dir = self._resolve_dir_path(output_dir)
+            if not out_dir:
+                out_dir = output_dir
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+        else:
+            out_dir = str(src_path.parent)
+
+        # Hedef dosya adı
+        target_name = src_path.stem + target_format
+        target_path = Path(out_dir) / target_name
+
+        # Hedef varsa numaralı ad ver
+        counter = 1
+        while target_path.exists():
+            target_name = f"{src_path.stem}_{counter}{target_format}"
+            target_path = Path(out_dir) / target_name
+            counter += 1
+
+        # Dosya boyut kontrolü (100MB üzeri uyarı)
+        src_size = src_path.stat().st_size
+        if src_size > 100 * 1024 * 1024:
+            size_mb = src_size / (1024 * 1024)
+            return {
+                "success": False,
+                "error": f"Dosya çok büyük ({size_mb:.1f} MB). Güvenlik sınırı: 100MB",
+            }
+
+        # Handler'ı çağır
+        handler = getattr(self, handler_name, None)
+        if not handler:
+            return {"success": False, "error": f"Handler bulunamadı: {handler_name}"}
+
+        try:
+            result = handler(src_path, target_path, quality=quality)
+            if result.get("success"):
+                result["source"] = str(src_path)
+                result["target"] = str(target_path)
+                result["source_format"] = src_ext
+                result["target_format"] = target_format
+                result["source_size"] = src_size
+                if target_path.exists():
+                    result["target_size"] = target_path.stat().st_size
+            return result
+        except Exception as e:
+            # Hata durumunda oluşan dosyayı temizle
+            if target_path.exists():
+                target_path.unlink()
+            return {"success": False, "error": f"Dönüştürme hatası: {str(e)}"}
+
+    def _get_supported_conversions(self, src_ext: str) -> list:
+        """Bir kaynak format için desteklenen hedef formatları döndür."""
+        return [t for (s, t) in self._CONVERTERS.keys() if s == src_ext]
+
+    # ── HANDLER: Sadece uzantı değiştir ──
+    @staticmethod
+    def _conv_rename_ext(src: Path, target: Path, **kw) -> dict:
+        shutil.copy2(str(src), str(target))
+        return {"success": True, "message": f"Dönüştürüldü: {target.name}"}
+
+    # ── HANDLER: Text/Markdown → PDF ──
+    @staticmethod
+    def _conv_text_to_pdf(src: Path, target: Path, **kw) -> dict:
+        try:
+            from reportlab.lib.pagesizes import A4
+            from reportlab.pdfgen import canvas
+            from reportlab.lib.units import cm
+        except ImportError:
+            return {
+                "success": False,
+                "error": "reportlab kütüphanesi gerekli: pip install reportlab",
+            }
+
+        text = src.read_text(encoding="utf-8", errors="replace")
+        c = canvas.Canvas(str(target), pagesize=A4)
+        width, height = A4
+        margin = 2 * cm
+        y = height - margin
+        line_height = 14
+
+        # Font ayarla (Türkçe karakter desteği)
+        try:
+            from reportlab.pdfbase import pdfmetrics
+            from reportlab.pdfbase.ttfonts import TTFont
+            import os
+
+            # Windows'ta Segoe UI veya Arial dene
+            for font_path in [
+                "C:/Windows/Fonts/arial.ttf",
+                "C:/Windows/Fonts/segoeui.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            ]:
+                if os.path.exists(font_path):
+                    pdfmetrics.registerFont(TTFont("CustomFont", font_path))
+                    c.setFont("CustomFont", 10)
+                    break
+            else:
+                c.setFont("Helvetica", 10)
+        except Exception:
+            c.setFont("Helvetica", 10)
+
+        for line in text.split("\n"):
+            if y < margin:
+                c.showPage()
+                y = height - margin
+                try:
+                    c.setFont("CustomFont", 10)
+                except Exception:
+                    c.setFont("Helvetica", 10)
+            c.drawString(margin, y, line[:120])  # Satır uzunluk sınırı
+            y -= line_height
+
+        c.save()
+        return {"success": True, "message": f"PDF oluşturuldu: {target.name}"}
+
+    # ── HANDLER: HTML → PDF ──
+    @staticmethod
+    def _conv_html_to_pdf(src: Path, target: Path, **kw) -> dict:
+        # weasyprint varsa kullan, yoksa basit reportlab
+        try:
+            from weasyprint import HTML
+
+            HTML(filename=str(src)).write_pdf(str(target))
+            return {"success": True, "message": f"PDF oluşturuldu: {target.name}"}
+        except ImportError:
+            pass
+        # Fallback: HTML'i text olarak oku, PDF yap
+        return FileOperationsModule._conv_text_to_pdf(src, target, **kw)
+
+    # ── HANDLER: Text → HTML ──
+    @staticmethod
+    def _conv_text_to_html(src: Path, target: Path, **kw) -> dict:
+        text = src.read_text(encoding="utf-8", errors="replace")
+        lines = text.split("\n")
+        html_lines = [f"<p>{line}</p>" if line.strip() else "<br>" for line in lines]
+        html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>{src.stem}</title></head>
+<body>{"".join(html_lines)}</body></html>"""
+        target.write_text(html, encoding="utf-8")
+        return {"success": True, "message": f"HTML oluşturuldu: {target.name}"}
+
+    # ── HANDLER: Markdown → HTML ──
+    @staticmethod
+    def _conv_md_to_html(src: Path, target: Path, **kw) -> dict:
+        text = src.read_text(encoding="utf-8", errors="replace")
+        try:
+            import markdown
+
+            html_body = markdown.markdown(text)
+        except ImportError:
+            # Basit fallback
+            html_body = text.replace("\n", "<br>")
+        html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>{src.stem}</title></head>
+<body>{html_body}</body></html>"""
+        target.write_text(html, encoding="utf-8")
+        return {"success": True, "message": f"HTML oluşturuldu: {target.name}"}
+
+    # ── HANDLER: Text → DOCX ──
+    @staticmethod
+    def _conv_text_to_docx(src: Path, target: Path, **kw) -> dict:
+        try:
+            from docx import Document
+        except ImportError:
+            return {
+                "success": False,
+                "error": "python-docx kütüphanesi gerekli: pip install python-docx",
+            }
+        text = src.read_text(encoding="utf-8", errors="replace")
+        doc = Document()
+        for line in text.split("\n"):
+            doc.add_paragraph(line)
+        doc.save(str(target))
+        return {"success": True, "message": f"DOCX oluşturuldu: {target.name}"}
+
+    # ── HANDLER: DOCX → Text ──
+    @staticmethod
+    def _conv_docx_to_txt(src: Path, target: Path, **kw) -> dict:
+        try:
+            from docx import Document
+        except ImportError:
+            return {
+                "success": False,
+                "error": "python-docx kütüphanesi gerekli: pip install python-docx",
+            }
+        doc = Document(str(src))
+        lines = [p.text for p in doc.paragraphs]
+        target.write_text("\n".join(lines), encoding="utf-8")
+        return {"success": True, "message": f"TXT oluşturuldu: {target.name}"}
+
+    # ── HANDLER: DOCX → PDF ──
+    @staticmethod
+    def _conv_docx_to_pdf(src: Path, target: Path, **kw) -> dict:
+        try:
+            from docx import Document
+        except ImportError:
+            return {"success": False, "error": "python-docx kütüphanesi gerekli"}
+        # DOCX → geçici TXT → PDF
+        doc = Document(str(src))
+        lines = [p.text for p in doc.paragraphs]
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding="utf-8"
+        ) as tmp:
+            tmp.write("\n".join(lines))
+            tmp_path = tmp.name
+        try:
+            result = FileOperationsModule._conv_text_to_pdf(
+                Path(tmp_path), target, **kw
+            )
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+        return result
+
+    # ── HANDLER: CSV → XLSX ──
+    @staticmethod
+    def _conv_csv_to_xlsx(src: Path, target: Path, **kw) -> dict:
+        try:
+            from openpyxl import Workbook
+        except ImportError:
+            return {
+                "success": False,
+                "error": "openpyxl kütüphanesi gerekli: pip install openpyxl",
+            }
+        import csv
+
+        wb = Workbook()
+        ws = wb.active
+        text = src.read_text(encoding="utf-8", errors="replace")
+        reader = csv.reader(text.splitlines())
+        for row in reader:
+            ws.append(row)
+        wb.save(str(target))
+        return {"success": True, "message": f"XLSX oluşturuldu: {target.name}"}
+
+    # ── HANDLER: XLSX → CSV ──
+    @staticmethod
+    def _conv_xlsx_to_csv(src: Path, target: Path, **kw) -> dict:
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            return {"success": False, "error": "openpyxl kütüphanesi gerekli"}
+        import csv
+
+        wb = load_workbook(str(src), read_only=True)
+        ws = wb.active
+        with open(str(target), "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            for row in ws.iter_rows(values_only=True):
+                writer.writerow(row)
+        wb.close()
+        return {"success": True, "message": f"CSV oluşturuldu: {target.name}"}
+
+    # ── HANDLER: Görsel dönüştürme ──
+    @staticmethod
+    def _conv_image(src: Path, target: Path, quality=None, **kw) -> dict:
+        try:
+            from PIL import Image
+        except ImportError:
+            return {
+                "success": False,
+                "error": "Pillow kütüphanesi gerekli: pip install Pillow",
+            }
+        img = Image.open(str(src))
+        # RGBA → RGB (JPEG için gerekli)
+        if target.suffix.lower() in (".jpg", ".jpeg") and img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        save_kw = {}
+        if quality and target.suffix.lower() in (".jpg", ".jpeg", ".webp"):
+            save_kw["quality"] = int(quality)
+        img.save(str(target), **save_kw)
+        return {"success": True, "message": f"Görsel dönüştürüldü: {target.name}"}
+
+    # ── HANDLER: Ses dönüştürme (ffmpeg) ──
+    @staticmethod
+    def _conv_audio(src: Path, target: Path, quality=None, **kw) -> dict:
+        ffmpeg = FileOperationsModule._find_ffmpeg()
+        if not ffmpeg:
+            return {
+                "success": False,
+                "error": "ffmpeg bulunamadı. Lütfen ffmpeg kurun.",
+            }
+        import subprocess
+
+        cmd = [ffmpeg, "-i", str(src), "-y"]
+        if quality and target.suffix.lower() == ".mp3":
+            cmd += ["-b:a", f"{int(quality)}k"]
+        cmd.append(str(target))
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            return {"success": False, "error": f"ffmpeg hatası: {result.stderr[:300]}"}
+        return {"success": True, "message": f"Ses dönüştürüldü: {target.name}"}
+
+    # ── HANDLER: Video → Ses ──
+    @staticmethod
+    def _conv_video_to_audio(src: Path, target: Path, quality=None, **kw) -> dict:
+        ffmpeg = FileOperationsModule._find_ffmpeg()
+        if not ffmpeg:
+            return {"success": False, "error": "ffmpeg bulunamadı."}
+        import subprocess
+
+        cmd = [ffmpeg, "-i", str(src), "-vn", "-y"]
+        if quality and target.suffix.lower() == ".mp3":
+            cmd += ["-b:a", f"{int(quality)}k"]
+        cmd.append(str(target))
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            return {"success": False, "error": f"ffmpeg hatası: {result.stderr[:300]}"}
+        return {"success": True, "message": f"Ses çıkarıldı: {target.name}"}
+
+    # ── HANDLER: Video format dönüştürme ──
+    @staticmethod
+    def _conv_video(src: Path, target: Path, **kw) -> dict:
+        ffmpeg = FileOperationsModule._find_ffmpeg()
+        if not ffmpeg:
+            return {"success": False, "error": "ffmpeg bulunamadı."}
+        import subprocess
+
+        cmd = [
+            ffmpeg,
+            "-i",
+            str(src),
+            "-y",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            str(target),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if result.returncode != 0:
+            return {"success": False, "error": f"ffmpeg hatası: {result.stderr[:300]}"}
+        return {"success": True, "message": f"Video dönüştürüldü: {target.name}"}
+
+    # ── HANDLER: Video → GIF ──
+    @staticmethod
+    def _conv_video_to_gif(src: Path, target: Path, **kw) -> dict:
+        ffmpeg = FileOperationsModule._find_ffmpeg()
+        if not ffmpeg:
+            return {"success": False, "error": "ffmpeg bulunamadı."}
+        import subprocess
+
+        # İlk 10 saniye, 10fps, 320px genişlik
+        cmd = [
+            ffmpeg,
+            "-i",
+            str(src),
+            "-y",
+            "-t",
+            "10",
+            "-vf",
+            "fps=10,scale=320:-1:flags=lanczos",
+            str(target),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            return {"success": False, "error": f"ffmpeg hatası: {result.stderr[:300]}"}
+        return {"success": True, "message": f"GIF oluşturuldu: {target.name}"}
+
+    # ── HANDLER: ZIP çıkar ──
+    @staticmethod
+    def _conv_unzip(src: Path, target: Path, **kw) -> dict:
+        import zipfile
+        extract_dir = src.parent / src.stem
+        extract_dir.mkdir(exist_ok=True)
+        with zipfile.ZipFile(str(src), "r") as zf:
+            zf.extractall(str(extract_dir))
+        return {"success": True, "message": f"Çıkarıldı: {extract_dir.name}/",
+                "extract_dir": str(extract_dir)}
+
+    # ── ffmpeg bulma yardımcısı ──
+    @staticmethod
+    def _find_ffmpeg() -> str:
+        """Sistemde ffmpeg'i bul."""
+        import shutil as _shutil
+        # PATH'te ara
+        ff = _shutil.which("ffmpeg")
+        if ff:
+            return ff
+        # Yaygın Windows konumları
+        for p in [
+            r"C:\ffmpeg\bin\ffmpeg.exe",
+            r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+            r"C:\tools\ffmpeg\bin\ffmpeg.exe",
+        ]:
+            if Path(p).exists():
+                return p
+        return ""
 
     # ================================================================
     # YARDIMCI

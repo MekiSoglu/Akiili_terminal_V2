@@ -252,7 +252,7 @@ class DAGExecutor:
                 result={"success": True, "data": [], "message": "foreach: boş liste"},
             )
 
-        logger.info(f" foreach: {len(items)} öğe × {tool_name}")
+        logger.info(f"  🔄 foreach: {len(items)} öğe × {tool_name}")
 
         # Modülü bul
         module, err = self._get_module(tool_name)
@@ -323,24 +323,29 @@ class DAGExecutor:
         for key, value in params.items():
             resolved_val = self._resolve_value(value, context)
 
-            # Path parametresine dosya içeriği geldiyse → orijinal sonuçtan file_path çıkar
-            if (
-                key in self._PATH_PARAMS
-                and isinstance(resolved_val, str)
-                and isinstance(value, str)
-                and "$t" in value
-            ):
-                # Çok satırlı veya çok uzun string → dosya yolu değil, içerik
-                if "\n" in resolved_val or len(resolved_val) > 260:
-                    # Orijinal context'ten file_path çıkarmayı dene
+            # Path parametresine dosya içeriği veya boş string geldiyse → orijinalden file_path çıkar
+            if key in self._PATH_PARAMS and isinstance(value, str) and "$t" in value:
+                # resolved_val bir dosya yoluna benziyor mu?
+                looks_like_path = (
+                    isinstance(resolved_val, str)
+                    and resolved_val.strip()  # boş değil
+                    and "\n" not in resolved_val  # çok satırlı değil
+                    and len(resolved_val) < 260  # çok uzun değil
+                    and (
+                        "/" in resolved_val
+                        or "\\" in resolved_val
+                        or "." in resolved_val
+                    )
+                )
+                if not looks_like_path:
                     match = re.match(r"\$t(\d+)\.output", value.strip())
                     if match:
                         task_id = f"t{match.group(1)}"
                         if task_id in context:
                             raw = context[task_id]
                             if isinstance(raw, dict):
-                                for fk in ("file_path", "full_path", "path"):
-                                    if fk in raw:
+                                for fk in ("file_path", "full_path", "path", "source"):
+                                    if fk in raw and raw[fk]:
                                         resolved_val = raw[fk]
                                         break
 
@@ -447,30 +452,30 @@ class DAGExecutor:
             resolved_str = DAGExecutor._shorten(resolved_val, 100)
 
             if str(raw_val) != str(resolved_val):
-                print(f" {task_id}.{key}: {raw_str} → {resolved_str}")
+                print(f"  📥 {task_id}.{key}: {raw_str} → {resolved_str}")
             else:
-                print(f" {task_id}.{key}: {resolved_str}")
+                print(f"  📥 {task_id}.{key}: {resolved_str}")
 
     @staticmethod
     def _debug_result(task_id: str, tool_name: str, step_result):
         """Her adımın çıktısını ekrana yaz."""
         if not step_result.success:
-            print(f"  {task_id} HATA: {step_result.error}")
+            print(f"  📤 {task_id} HATA: {step_result.error}")
             return
 
         r = step_result.result
         if not isinstance(r, dict):
-            print(f" {task_id} → {DAGExecutor._shorten(r, 150)}")
+            print(f"  📤 {task_id} → {DAGExecutor._shorten(r, 150)}")
             return
 
         shown = False
         for key in ("data", "content", "message"):
             if key in r and r[key]:
                 val = r[key]
-                print(f" {task_id}.{key}: {DAGExecutor._shorten(val, 200)}")
+                print(f"  📤 {task_id}.{key}: {DAGExecutor._shorten(val, 200)}")
                 shown = True
         if not shown:
-            print(f"  {task_id}: (sonuç boş)")
+            print(f"  📤 {task_id}: (sonuç boş)")
 
     @staticmethod
     def _shorten(value, max_len: int = 80) -> str:

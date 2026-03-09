@@ -363,11 +363,9 @@ TOOL_REGISTRY = [
         "name": "Küçük Dosyaları Bul",
         "module": "file_operations",
         "params": "max_size_mb",
-        "desc": "Boyutu belirtilen MB değerinin altında kalan dosyaları bulur. Sadece boyut filtresi için kullanılır.",
+        "desc": "Belirtilen boyutun altındaki dosyaları bulur.",
         "keywords": (
-            "küçük dosya, küçük dosyaları bul, 1MB altı, ufak dosyalar, "
-            "az yer kaplayan, boyutu küçük, boyut altı, MB altı, "
-            "küçük boyutlu dosyalar, en küçük dosyalar"
+            "küçük dosya, küçük dosyaları bul, 1MB altı, ufak dosyalar, az yer kaplayan"
         ),
     },
     {
@@ -401,6 +399,42 @@ TOOL_REGISTRY = [
         "keywords": (
             "uzantı istatistik, dosya türleri, kaç tane py, "
             "dosya dağılımı, uzantı raporu, uzantı sayısı"
+        ),
+    },
+    # ── DOSYA DÖNÜŞTÜRME ──
+    {
+        "id": "convert_file",
+        "name": "Dosya Dönüştür",
+        "module": "file_operations",
+        "params": "source, target_format, output_dir, quality",
+        "desc": "Dosyayı farklı formata dönüştürür. Orijinal dosya korunur, kopya üzerinde çalışır. "
+        "Desteklenen: txt↔pdf, txt↔docx, csv↔xlsx, png↔jpg, wav↔mp3, mp4→mp3, mp4→gif ve daha fazlası.",
+        "output": "data: {source, target, source_format, target_format, source_size, target_size}",
+        "rich_info": (
+            "convert_file: Dosya format dönüştürücü. Orijinal dosyaya DOKUNMAZ.\n"
+            "Parametreler: source (kaynak dosya), target_format (hedef format: .pdf, .jpg, .mp3 vs.)\n"
+            "Opsiyonel: output_dir (çıktı dizini), quality (kalite: görsel 1-100, ses bitrate 128/192/320)\n"
+            "DOKÜMAN: txt→pdf, txt→docx, txt→html, md→pdf, md→html, csv→xlsx, xlsx→csv, docx→txt, docx→pdf\n"
+            "GÖRSEL: png↔jpg, webp→png, webp→jpg, bmp→png, png→gif, png→webp\n"
+            "SES: wav↔mp3, ogg→mp3, flac→mp3, m4a→mp3 (ffmpeg gerekli)\n"
+            "VİDEO: mp4→mp3, mp4→wav, mkv→mp4, avi→mp4, mp4→gif (ffmpeg gerekli)\n"
+            "ÖRNEK: 'rapor.txt dosyasını PDF yap'\n"
+            "→ convert_file(source: 'rapor.txt', target_format: 'pdf')\n"
+            "ÖRNEK: 'test.png dosyasını jpg formatına çevir'\n"
+            "→ convert_file(source: 'test.png', target_format: 'jpg')\n"
+            "ÖRNEK: 'ses.wav dosyasını mp3 olarak kaydet, kalite 320'\n"
+            "→ convert_file(source: 'ses.wav', target_format: 'mp3', quality: 320)"
+        ),
+        "keywords": (
+            "dosya dönüştür, format değiştir, çevir, dönüştürme, convert, "
+            "pdf yap, pdf'e çevir, txt'den pdf, dosyayı pdf yap, "
+            "jpg yap, png'den jpg, resim dönüştür, görsel çevir, "
+            "mp3 yap, wav'dan mp3, ses dönüştür, ses çevir, "
+            "mp4 yap, video dönüştür, mp4'ten ses çıkar, "
+            "excel'e çevir, csv'den xlsx, xlsx'ten csv, "
+            "docx yap, word'e çevir, html yap, "
+            "formata çevir, formatını değiştir, olarak kaydet, "
+            "dönüştürme yap, dosya tipi değiştir"
         ),
     },
     # ╔══════════════════════════════════════════════════════════════════╗
